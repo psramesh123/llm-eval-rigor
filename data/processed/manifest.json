@@ -1,0 +1,10 @@
+{
+  "seed": 20260903,
+  "eval_n": 462,
+  "dev_n": 231,
+  "train_n": 10003,
+  "n_classes": 77,
+  "eval_per_class": 6,
+  "dev_per_class": 3,
+  "eval_sha1": "74172fe6d2019e3dcab8953c3e3d1bc38fd0f6c4"
+}
