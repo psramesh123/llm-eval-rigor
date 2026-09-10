@@ -19,6 +19,7 @@ uncertainty quantification necessary rather than decorative.
 import argparse
 import hashlib
 import json
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
@@ -37,15 +38,15 @@ def load_raw(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         local = data_dir / f"{split}.csv"
         if not local.exists():
             print(f"downloading {split}.csv ...")
-            pd.read_csv(f"{RAW}/{split}.csv").to_csv(local, index=False)
+            urllib.request.urlretrieve(f"{RAW}/{split}.csv", local)
         frames[split] = pd.read_csv(local)
     return frames["train"], frames["test"]
 
 
 def sanity_checks(train: pd.DataFrame, test: pd.DataFrame) -> None:
-    assert list(train.columns) == ["text", "category"], train.columns
-    assert train.isna().sum().sum() == 0, "nulls in train"
-    assert test.isna().sum().sum() == 0, "nulls in test"
+    for name, df in (("train", train), ("test", test)):
+        assert list(df.columns) == ["text", "category"], (name, df.columns)
+        assert df.notna().all().all(), f"nulls in {name}"
     assert train.category.nunique() == test.category.nunique() == 77, "expected 77 classes"
     assert test.text.duplicated().sum() == 0, "duplicate texts in test"
     counts = test.category.value_counts()
@@ -53,25 +54,24 @@ def sanity_checks(train: pd.DataFrame, test: pd.DataFrame) -> None:
     print(f"checks passed | train={len(train)} test={len(test)} classes=77 balanced=40/class")
 
 
+def shuffle(df: pd.DataFrame, seed: int) -> pd.DataFrame:
+    return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
 def stratified_split(test: pd.DataFrame, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Take EVAL_PER_CLASS then DEV_PER_CLASS from each class, disjoint."""
-    shuffled = test.sample(frac=1.0, random_state=seed).reset_index(drop=True)
     eval_rows, dev_rows = [], []
-    for _, g in shuffled.groupby("category"):
+    for _, g in shuffle(test, seed).groupby("category"):
         eval_rows.append(g.iloc[:EVAL_PER_CLASS])
         dev_rows.append(g.iloc[EVAL_PER_CLASS:EVAL_PER_CLASS + DEV_PER_CLASS])
-
-    eval_df = pd.concat(eval_rows).sample(frac=1.0, random_state=seed).reset_index(drop=True)
-    dev_df = pd.concat(dev_rows).sample(frac=1.0, random_state=seed).reset_index(drop=True)
-    return eval_df, dev_df
+    return shuffle(pd.concat(eval_rows), seed), shuffle(pd.concat(dev_rows), seed)
 
 
 def add_ids(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
     """Stable example_id derived from the text, so IDs survive reordering."""
-    df = df.copy()
-    df["example_id"] = [
+    df = df.assign(example_id=[
         f"{prefix}_{hashlib.sha1(t.encode()).hexdigest()[:10]}" for t in df.text
-    ]
+    ])
     assert df.example_id.duplicated().sum() == 0, "id collision"
     return df[["example_id", "text", "category"]]
 
@@ -91,15 +91,16 @@ def main() -> None:
     eval_df, dev_df = stratified_split(test, SEED)
     eval_df, dev_df = add_ids(eval_df, "ev"), add_ids(dev_df, "dv")
 
-    assert set(eval_df.example_id) & set(dev_df.example_id) == set(), "eval/dev overlap"
-    assert eval_df.category.value_counts().nunique() == 1, "eval not balanced"
-    assert dev_df.category.value_counts().nunique() == 1, "dev not balanced"
+    labels = sorted(train.category.unique())
+    assert set(eval_df.text).isdisjoint(dev_df.text), "eval/dev overlap"
+    for name, df, per_class in (("eval", eval_df, EVAL_PER_CLASS), ("dev", dev_df, DEV_PER_CLASS)):
+        counts = df.category.value_counts().to_dict()
+        assert counts == dict.fromkeys(labels, per_class), f"{name} not balanced"
 
     eval_df.to_csv(out_dir / "eval_set.csv", index=False)
     dev_df.to_csv(out_dir / "dev_set.csv", index=False)
     train.to_csv(out_dir / "train_set.csv", index=False)
 
-    labels = sorted(train.category.unique())
     (out_dir / "labels.json").write_text(json.dumps(labels, indent=2))
 
     manifest = {
