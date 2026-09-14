@@ -1,10 +1,12 @@
 {
   "seed": 20260903,
-  "eval_n": 462,
-  "dev_n": 231,
-  "train_n": 10003,
   "n_classes": 77,
-  "eval_per_class": 6,
-  "dev_per_class": 3,
-  "eval_sha1": "74172fe6d2019e3dcab8953c3e3d1bc38fd0f6c4"
+  "train_n": 9000,
+  "val_n": 1003,
+  "dev_n": 385,
+  "eval_n": 2695,
+  "dev_per_class": 5,
+  "eval_per_class": 35,
+  "val_fraction": 0.1,
+  "eval_sha1": "0925a953e0711325e35450b28d45d45bb2d749e9"
 }
