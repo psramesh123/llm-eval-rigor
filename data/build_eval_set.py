@@ -1,19 +1,27 @@
 """
-Build frozen evaluation and development sets from Banking77.
+Build four disjoint data pools from Banking77.
 
-Design decisions (documented deliberately):
-  - EVAL set (6/class = 462) is frozen and used ONLY for final reported runs.
-  - DEV set (3/class = 231) is for prompt iteration, hyperparameter choices,
-    retrieval-k selection. Disjoint from EVAL.
-  - Both drawn from the official test split so the training split stays
-    untouched for the classical and embedding systems.
-  - Fixed seed. Sets are written to disk and committed so every run is
-    reproducible and comparable.
+  TRAIN (~9,000)  fitting TF-IDF and fine-tuning the transformer
+  VAL   (~1,000)  epoch selection, early stopping, hyperparameters
+  DEV   (385)     prompt iteration, retrieval-k selection
+  EVAL  (2,695)   the reported number; final runs only
 
-Why small n: the statistical layer of this project exists because small
-evaluation sets are where naive CLT-based error bars fail.
-A 462-example set is realistic for a specialised benchmark and makes the
-uncertainty quantification necessary rather than decorative.
+The separation is the integrity of the project. Rules, ordered by how badly
+violating them would matter:
+
+  1. Nothing is ever tuned on EVAL. Not a prompt, not an epoch count.
+  2. Transformer epoch selection uses VAL, carved from TRAIN. Never DEV or EVAL.
+  3. Prompt and retrieval-k iteration uses DEV only.
+  4. Every system is evaluated on the identical EVAL set, with per-example
+     results joined on example_id.
+
+EVAL is deliberately the full remainder of the official test split rather than a
+subsample. Sample size is the object of study here, not a constraint: the
+headline experiment subsamples EVAL to measure how reliably a benchmark of size
+n recovers the full-data ranking. Withholding data to make a difference
+detectable would be engineering the result.
+
+Fixed seed. All pools written to disk and committed so results are reproducible.
 """
 
 import argparse
@@ -25,8 +33,8 @@ from pathlib import Path
 import pandas as pd
 
 SEED = 20260903
-EVAL_PER_CLASS = 6
-DEV_PER_CLASS = 3
+DEV_PER_CLASS = 5      # EVAL takes the remaining 35/class
+VAL_FRACTION = 0.10    # stratified holdout from TRAIN for epoch selection
 
 RAW = "https://raw.githubusercontent.com/PolyAI-LDN/task-specific-datasets/master/banking_data"
 
@@ -58,13 +66,23 @@ def shuffle(df: pd.DataFrame, seed: int) -> pd.DataFrame:
     return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
-def stratified_split(test: pd.DataFrame, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Take EVAL_PER_CLASS then DEV_PER_CLASS from each class, disjoint."""
-    eval_rows, dev_rows = [], []
+def split_test(test: pd.DataFrame, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """DEV takes DEV_PER_CLASS from each class; EVAL takes everything else."""
+    dev_rows, eval_rows = [], []
     for _, g in shuffle(test, seed).groupby("category"):
-        eval_rows.append(g.iloc[:EVAL_PER_CLASS])
-        dev_rows.append(g.iloc[EVAL_PER_CLASS:EVAL_PER_CLASS + DEV_PER_CLASS])
+        dev_rows.append(g.iloc[:DEV_PER_CLASS])
+        eval_rows.append(g.iloc[DEV_PER_CLASS:])
     return shuffle(pd.concat(eval_rows), seed), shuffle(pd.concat(dev_rows), seed)
+
+
+def split_train(train: pd.DataFrame, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Stratified VAL holdout from TRAIN, for epoch selection only."""
+    train_rows, val_rows = [], []
+    for _, g in shuffle(train, seed).groupby("category"):
+        n_val = max(1, round(len(g) * VAL_FRACTION))
+        val_rows.append(g.iloc[:n_val])
+        train_rows.append(g.iloc[n_val:])
+    return shuffle(pd.concat(train_rows), seed), shuffle(pd.concat(val_rows), seed)
 
 
 def add_ids(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
@@ -85,32 +103,43 @@ def main() -> None:
     data_dir, out_dir = Path(args.data_dir), Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train, test = load_raw(data_dir)
-    sanity_checks(train, test)
+    train_full, test = load_raw(data_dir)
+    sanity_checks(train_full, test)
 
-    eval_df, dev_df = stratified_split(test, SEED)
+    eval_df, dev_df = split_test(test, SEED)
+    train_df, val_df = split_train(train_full, SEED)
+
     eval_df, dev_df = add_ids(eval_df, "ev"), add_ids(dev_df, "dv")
+    train_df, val_df = add_ids(train_df, "tr"), add_ids(val_df, "va")
 
-    labels = sorted(train.category.unique())
-    assert set(eval_df.text).isdisjoint(dev_df.text), "eval/dev overlap"
-    for name, df, per_class in (("eval", eval_df, EVAL_PER_CLASS), ("dev", dev_df, DEV_PER_CLASS)):
-        counts = df.category.value_counts().to_dict()
+    labels = sorted(train_full.category.unique())
+
+    # every pool disjoint from every other
+    pools = {"train": train_df, "val": val_df, "dev": dev_df, "eval": eval_df}
+    names = list(pools)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            assert set(pools[a].text).isdisjoint(pools[b].text), f"{a}/{b} overlap"
+
+    # dev and eval balanced by construction; train/val only need full coverage
+    for name, per_class in (("dev", DEV_PER_CLASS), ("eval", 40 - DEV_PER_CLASS)):
+        counts = pools[name].category.value_counts().to_dict()
         assert counts == dict.fromkeys(labels, per_class), f"{name} not balanced"
+    for name in ("train", "val"):
+        assert pools[name].category.nunique() == 77, f"{name} missing classes"
 
-    eval_df.to_csv(out_dir / "eval_set.csv", index=False)
-    dev_df.to_csv(out_dir / "dev_set.csv", index=False)
-    train.to_csv(out_dir / "train_set.csv", index=False)
+    for name, df in pools.items():
+        df.to_csv(out_dir / f"{name}_set.csv", index=False)
 
     (out_dir / "labels.json").write_text(json.dumps(labels, indent=2))
 
     manifest = {
         "seed": SEED,
-        "eval_n": len(eval_df),
-        "dev_n": len(dev_df),
-        "train_n": len(train),
         "n_classes": len(labels),
-        "eval_per_class": EVAL_PER_CLASS,
+        **{f"{k}_n": len(v) for k, v in pools.items()},
         "dev_per_class": DEV_PER_CLASS,
+        "eval_per_class": 40 - DEV_PER_CLASS,
+        "val_fraction": VAL_FRACTION,
         "eval_sha1": hashlib.sha1(
             "".join(sorted(eval_df.example_id)).encode()
         ).hexdigest(),
@@ -118,7 +147,7 @@ def main() -> None:
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
     print(json.dumps(manifest, indent=2))
-    print(f"\nwrote {out_dir}/eval_set.csv, dev_set.csv, train_set.csv, labels.json, manifest.json")
+    print(f"\nwrote train/val/dev/eval sets + labels.json + manifest.json to {out_dir}")
 
 
 if __name__ == "__main__":
