@@ -5,3 +5,5 @@ data/raw/
 *.ipynb_checkpoints
 artifacts/
 results/
+.DS_Store
+data/llm_cache/
