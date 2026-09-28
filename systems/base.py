@@ -17,6 +17,7 @@ class Prediction:
     latency_ms: float
     input_tokens: int = 0
     output_tokens: int = 0
+    raw_output: str = ""
 
 
 class System(ABC):
@@ -51,9 +52,10 @@ def run_and_save(
     eval_df: pd.DataFrame,
     train_df: pd.DataFrame | None = None,
     results_dir: str | Path = "results",
+    split: str = "eval",
 ) -> pd.DataFrame:
     """Fit, predict, join to truth, persist per-example rows. Returns the frame."""
-    results_dir = Path(results_dir)
+    results_dir = Path(results_dir) / split
     results_dir.mkdir(parents=True, exist_ok=True)
 
     if train_df is not None:
@@ -74,6 +76,6 @@ def run_and_save(
     df[cols].to_csv(results_dir / f"{system.name}.csv", index=False)
 
     (results_dir / f"{system.name}.config.json").write_text(
-        json.dumps({"system": system.name, "n": len(df), **system.config()}, indent=2)
+        json.dumps({"system": system.name, "split": split, "n": len(df), **system.config()}, indent=2)
     )
     return df[cols]
