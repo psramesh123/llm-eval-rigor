@@ -235,15 +235,25 @@ class TransformerClassifier(System):
     name = "transformer"
 
     def __init__(self, ckpt: Path = CKPT, labels_json="data/processed/labels.json"):
+        ckpt = Path(ckpt)
+        # Without this, a missing directory is passed straight to the Hub as a
+        # repo id and surfaces as a misleading 401 / RepositoryNotFoundError.
+        missing = [f for f in ("model.pt", "tokenizer_config.json", "training_log.json")
+                   if not (ckpt / f).exists()]
+        if missing:
+            raise FileNotFoundError(
+                f"no usable checkpoint in {ckpt} (missing: {', '.join(missing)}). "
+                f"Run: python -m systems.transformer")
+
         self.device = get_device()
         self.labels = json.loads(Path(labels_json).read_text())
         self.tok = AutoTokenizer.from_pretrained(ckpt)
         self.model = IntentClassifier(len(self.labels))
         self.model.load_state_dict(
-            torch.load(Path(ckpt) / "model.pt", map_location=self.device))
+            torch.load(ckpt / "model.pt", map_location=self.device))
         self.model.to(self.device).eval()
         self.collate = make_collate(self.tok.pad_token_id)
-        self.log = json.loads((Path(ckpt) / "training_log.json").read_text())
+        self.log = json.loads((ckpt / "training_log.json").read_text())
 
     def config(self) -> dict:
         return {k: v for k, v in self.log.items() if k != "history"}
