@@ -44,6 +44,9 @@ EPOCHS = 10
 WARMUP_FRAC = 0.1
 SEED = 20260903
 CKPT = Path("artifacts/transformer")
+# Every file TransformerClassifier needs. training_log.json is written last,
+# so its presence also marks a training run as complete rather than interrupted.
+CKPT_FILES = ("model.pt", "tokenizer_config.json", "training_log.json")
 
 
 def get_device() -> str:
@@ -155,10 +158,13 @@ def evaluate(model, loader, device) -> tuple[float, float, list[int]]:
 
 def train(train_csv="data/processed/train_set.csv",
           val_csv="data/processed/val_set.csv",
-          labels_json="data/processed/labels.json") -> None:
-    set_seed()
+          labels_json="data/processed/labels.json",
+          seed: int = SEED,
+          ckpt: Path | str = CKPT) -> None:
+    ckpt = Path(ckpt)
+    set_seed(seed)
     device = get_device()
-    print(f"device: {device}")
+    print(f"device: {device} | seed: {seed} | ckpt: {ckpt}")
 
     labels = json.loads(Path(labels_json).read_text())
     label2id = {l: i for i, l in enumerate(labels)}
@@ -185,7 +191,7 @@ def train(train_csv="data/processed/train_set.csv",
         num_warmup_steps=int(total_steps * WARMUP_FRAC),
         num_training_steps=total_steps)
 
-    CKPT.mkdir(parents=True, exist_ok=True)
+    ckpt.mkdir(parents=True, exist_ok=True)
     best_f1, history = -1.0, []
 
     for epoch in range(1, EPOCHS + 1):
@@ -216,21 +222,33 @@ def train(train_csv="data/processed/train_set.csv",
         # Checkpoint selection on VAL macro-F1. Never on DEV or EVAL.
         if val_f1 > best_f1:
             best_f1 = val_f1
-            torch.save(model.state_dict(), CKPT / "model.pt")
-            tok.save_pretrained(CKPT)
+            torch.save(model.state_dict(), ckpt / "model.pt")
+            tok.save_pretrained(ckpt)
             print(f"  saved (best val_macro_f1 {best_f1:.4f})")
 
-    (CKPT / "training_log.json").write_text(json.dumps({
+    (ckpt / "training_log.json").write_text(json.dumps({
         "model_name": MODEL_NAME, "max_len": MAX_LEN, "batch_size": BATCH_SIZE,
-        "lr": LR, "epochs": EPOCHS, "warmup_frac": WARMUP_FRAC, "seed": SEED,
+        "lr": LR, "epochs": EPOCHS, "warmup_frac": WARMUP_FRAC, "seed": seed,
         "best_val_macro_f1": best_f1, "history": history,
     }, indent=2))
-    print(f"\nbest val macro-F1 {best_f1:.4f} -> {CKPT}/model.pt")
+    print(f"\nbest val macro-F1 {best_f1:.4f} -> {ckpt}/model.pt")
 
 
 # ----------------------------------------------------------------------------
 # Inference: same System interface as every other approach
 # ----------------------------------------------------------------------------
+def missing_checkpoint_files(ckpt: Path | str) -> list[str]:
+    """Which of CKPT_FILES are absent from `ckpt`. Empty means usable."""
+    ckpt = Path(ckpt)
+    return [f for f in CKPT_FILES if not (ckpt / f).exists()]
+
+
+def has_checkpoint(ckpt: Path | str) -> bool:
+    """True when `ckpt` holds a complete, loadable checkpoint."""
+    return not missing_checkpoint_files(ckpt)
+
+
+
 class TransformerClassifier(System):
     name = "transformer"
 
@@ -238,8 +256,7 @@ class TransformerClassifier(System):
         ckpt = Path(ckpt)
         # Without this, a missing directory is passed straight to the Hub as a
         # repo id and surfaces as a misleading 401 / RepositoryNotFoundError.
-        missing = [f for f in ("model.pt", "tokenizer_config.json", "training_log.json")
-                   if not (ckpt / f).exists()]
+        missing = missing_checkpoint_files(ckpt)
         if missing:
             raise FileNotFoundError(
                 f"no usable checkpoint in {ckpt} (missing: {', '.join(missing)}). "
