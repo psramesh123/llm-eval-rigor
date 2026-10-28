@@ -7,3 +7,4 @@ artifacts/
 results/
 .DS_Store
 data/llm_cache/
+.pytest_cache/
